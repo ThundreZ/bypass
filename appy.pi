@@ -1,0 +1,50 @@
+import os
+import requests
+from flask import Flask, request, Response, abort
+
+app = Flask(__name__)
+
+TARGET = os.getenv("BACKEND_URL", "https:/dale-allen.oliver.com").rstrip("/")
+TIMEOUT = float(os.getenv("PROXY_TIMEOUT", "30")) 
+
+@app.before_request
+def proxy():
+    # build URL (preserve query string)
+    url = f"{TARGET}{request.path}"
+    if request.query_string:
+        url = f"{url}?{request.query_string.decode()}"
+
+    # forward headers safely + add forwarded headers
+    headers = dict(request.headers)
+    headers.pop("Host", None)
+    headers.pop("Content-Length", None)
+    headers["X-Forwarded-Host"] = request.host
+    headers["X-Forwarded-Proto"] = request.scheme
+    headers["X-Forwarded-For"] = request.headers.get("X-Forwarded-For", request.remote_addr)
+
+    try:
+        resp = requests.request(
+            method=request.method,
+            url=url,
+            headers=headers,
+            data=request.get_data(),
+            cookies=request.cookies,
+            allow_redirects=False,
+            stream=True,
+            timeout=TIMEOUT,
+        )
+    except requests.exceptions.RequestException as e:
+        abort(502, description=str(e))
+
+    excluded = {"content-encoding", "transfer-encoding", "content-length", "connection"}
+    response_headers = [(k, v) for k, v in resp.raw.headers.items() if k.lower() not in excluded]
+
+    def generate():
+        for chunk in resp.iter_content(chunk_size=8192):
+            if chunk:
+                yield chunk
+
+    return Response(generate(), status=resp.status_code, headers=response_headers)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=True)
